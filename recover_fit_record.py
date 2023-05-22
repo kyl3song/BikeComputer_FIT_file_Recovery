@@ -5,6 +5,7 @@ import os
 import sys
 import DataType
 import struct
+from datetime import datetime
 from Util import ConvertUtil, LogUtil
 
 
@@ -260,11 +261,6 @@ class recoverRecord:
                     if (_datetime < RECOVER_MINTIME_YYYYMMDD) or (_datetime > RECOVER_MAXTIME_YYYYMMDD):
                         self.logger.debug(f"TIMESTAMP INVALID: {converted_val}")
                         return
-                # Check if GPS values are invalid // e.g. 37.464757 (°)
-                if (field_name_converted == 'Position_lat') or (field_name_converted == 'Position_long'):
-                    if float(converted_val.split(' ')[0]) <= 0:
-                        self.logger.debug(f"Position Value INVALID: {field_name_converted}")
-                        return
 
                 msg = f"{field_name_converted}: {converted_val}" if known_field else f"{field_name_converted}: {field_data}"
 
@@ -308,7 +304,11 @@ class recoverRecord:
             invalid_header = self.parse_record_hdr()
 
             if invalid_header and def_mesg_offset_list:
-                next_offset = list(filter(lambda x: x > self.current_offset, def_mesg_offset_list))[0]
+                next_offset_list = list(filter(lambda x: x > self.current_offset, def_mesg_offset_list))
+                if next_offset_list:
+                    next_offset = next_offset_list[0]
+                else: continue
+
                 sub_regex_list = []
                 # Generate regex with the values from RECORD Lookup Table
                 if self.LOOKUP_TABLE_GMESG_ONLY_RECORD:
