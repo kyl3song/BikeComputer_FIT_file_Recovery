@@ -103,10 +103,13 @@ class RecordFieldName(Enum):
     NUMBER = 5
     PRODUCT_NAME = 8
 
-class RecordDataType(Enum):
+class FILE_ID_DataType(Enum):
     ACTIVITY = 4
     WORKOUT = 5
     COURSE = 6
+
+class FILE_ID_Manufacturer(Enum):
+    GARMIN = 1
 
 
 FIELD_NAME = {

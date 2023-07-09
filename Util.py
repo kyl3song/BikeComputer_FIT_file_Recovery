@@ -2,6 +2,7 @@
 
 import datetime
 import os
+import DataType
 import logging
 
 class ConvertUtil:
@@ -14,7 +15,7 @@ class ConvertUtil:
         self.base_utc = base_utc
         _is_valid = self.is_valid() # Checks if data is defined as invalid
 
-        if self.field_name == 'TIMESTAMP':
+        if (self.field_name == 'TIMESTAMP') or (self.field_name == 'TIME_CREATED'):
             self.unit = 'UTC0' if self.base_utc is None else f'UTC{base_utc}'
             self.convert_to_utc_timstamp()
             self.result = f'{self.value if _is_valid else "-"} ({self.unit})'
@@ -99,6 +100,22 @@ class ConvertUtil:
             self.value = self.value / 128 if _is_valid else "-"
             self.result = f'{self.value} ({self.unit})'
 
+        elif self.field_name == 'SERIAL_NUMBER':
+            self.result = f'{self.value}'
+
+        elif self.field_name == 'PRODUCT':
+            self.result = f'{self.value}'
+
+        elif self.field_name == 'TYPE':
+            self.result = DataType.FILE_ID_DataType(self.value).name
+
+        elif self.field_name == 'MANUFACTURER':
+            self.result = DataType.FILE_ID_Manufacturer(self.value).name
+
+
+        else:
+            self.result = f'{self.value}'
+
         return self.result
 
     def is_valid(self):
@@ -136,8 +153,9 @@ class LogUtil:
         os.makedirs(log_path, exist_ok=True)
         log_file = os.path.join(log_path, log_name)
 
-        logger = logging.getLogger("CycleKiller")
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        logger = logging.getLogger()
+        #formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        formatter = logging.Formatter('[%(asctime)s][%(levelname)s] %(message)s')
 
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
@@ -146,8 +164,6 @@ class LogUtil:
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-
-        logger.info("Job Start..!!")
 
         if log_level == "INFO":
             logger.setLevel(logging.INFO)

@@ -5,7 +5,7 @@ import os
 import sys
 import DataType
 import struct
-from datetime import datetime
+import datetime
 from Util import ConvertUtil, LogUtil
 
 
@@ -22,6 +22,10 @@ class recoverRecord:
         self.LOOKUP_TABLE_GMESG_NOT_RECORD = {}
         self.data_mesg_count = 0
         self.current_offset = 0
+        self.autogen_regex_pattern_match_count = 0
+        self.RECOVER_MINTIME_YYYYMMDD = None
+        self.RECOVER_MAXTIME_YYYYMMDD = None
+        self.RECOVER_TIMEDELTA_DAYS = 2
         self.convert_util = ConvertUtil()
 
         self.get_file_size()
@@ -31,7 +35,9 @@ class recoverRecord:
         self.logger_flag = True
         self.log_util = LogUtil()
         log_path = os.path.dirname(target_file)
-        log_name = 'CycleKiller.log'
+        _basename = os.path.basename(target_file)
+        _basename = os.path.splitext(_basename)[0]
+        log_name = _basename + '_FIT_Recover.log'
         self.logger = self.log_util.get_logger(log_path=log_path,
                                                log_name=log_name,
                                                log_level=LOG_LEVEL)
@@ -171,13 +177,13 @@ class recoverRecord:
                                             'LOCAL_MESG': hex(local_msg_num),
                                             'GLOBAL_MESG': global_message,
                                             'FIELD_COUNTS': record_num_of_field,
-                                            # 각 값의 중간값이 사이즈이므로 모두 합친 값
+                                            # FIELD_SIZE needs for regex auto-generation
                                             'FIELD_SIZE': sum([i[1] for i in field_desc_list]),
                                             'ARCH': self.architecture,
                                             'FIELD_DESC': field_desc_list}}
 
             self.logger.debug(msg)
-            self.fh_dest.write(f'{msg}\n')
+            #self.fh_dest.write(f'{msg}\n')
 
             # Lookup table update - RECORD Lookup Table: Global Message ALL
             self.LOOKUP_TABLE_GMESG_ALL.update(lookup_table)
@@ -197,20 +203,23 @@ class recoverRecord:
         # 3 bytes per each field
         field_desc_list = []
 
-        for _ in range(record_num_of_field):
-            _temp = []
-            _record_content_variable = self.fh_fit.read(3)
-            field_definition_num = _record_content_variable[0]
-            defined_field_size = _record_content_variable[1]
-            base_type = _record_content_variable[2]
+        try:
+            for _ in range(record_num_of_field):
+                _temp = []
+                _record_content_variable = self.fh_fit.read(3)
+                field_definition_num = _record_content_variable[0]
+                defined_field_size = _record_content_variable[1]
+                base_type = _record_content_variable[2]
 
-            _temp.append(field_definition_num)
-            _temp.append(defined_field_size)
-            _temp.append(base_type)
+                _temp.append(field_definition_num)
+                _temp.append(defined_field_size)
+                _temp.append(base_type)
 
-            field_desc_list.append(_temp)
-
-        return field_desc_list
+                field_desc_list.append(_temp)
+        except Exception as e:
+            self.logger.critical(f"[ERROR][PARSE_FIELD_DEFINITION] {e}")
+        finally:
+            return field_desc_list
 
     def decode_data_message(self, local_msg_num):
         """ Decodes Data Message : Decode values based on the Definition Message """
@@ -222,7 +231,7 @@ class recoverRecord:
             return
 
         # Skip file pointer to the size of Field and return.
-        if global_mesg != 'RECORD':
+        if (global_mesg != 'RECORD') and (global_mesg != 'FILE_ID'):
             _ = self.fh_fit.read(self.LOOKUP_TABLE_GMESG_ALL[local_msg_num]['FIELD_SIZE'])
             return
 
@@ -232,8 +241,9 @@ class recoverRecord:
         # if hex(self.current_offset) == '0x0000':
         #     print("STOP")
 
-        self.logger.debug(f"[*] Data Message Offset(Inc. HDR): {hex(self.current_offset)} ~ {hex(self.current_offset + _tmp_field_size)}")
-        self.fh_dest.write(f"[*] Data Message Offset(Inc. HDR): {hex(self.current_offset)} ~ {hex(self.current_offset + _tmp_field_size)}\n")
+        _offset_msg = f"[*] Data Message Offset(Inc. HDR): {hex(self.current_offset)} ~ {hex(self.current_offset + _tmp_field_size)}"
+        self.logger.debug(_offset_msg)
+        self.fh_dest.write(f"{_offset_msg}\n")
 
         for field_name, field_size, base_type in field_desc_list:
             known_field = True
@@ -252,32 +262,46 @@ class recoverRecord:
             try:
                 field_data = struct.unpack(fmt, field_data)[0]
                 converted_val = self.convert_util.convert_value_by_field(field_name_converted, field_data, invalid_val, base_utc='+9')
+
+                # Only need TIME_CREATED from 'FILE_ID' to make the base timestamp to recover.
+                if (global_mesg == 'FILE_ID') and (field_name_converted == 'TIME_CREATED'):
+                    _created_time = converted_val.split('(')[0].strip()
+                    _created_time = datetime.datetime.strptime(_created_time, '%Y-%m-%d %H:%M:%S')
+                    _min = _created_time - datetime.timedelta(days=self.RECOVER_TIMEDELTA_DAYS)
+                    self.RECOVER_MINTIME_YYYYMMDD = int(f'{_min.year}{_min.month:02d}{_min.day:02d}')
+                    _max = _created_time + datetime.timedelta(days=self.RECOVER_TIMEDELTA_DAYS)
+                    self.RECOVER_MAXTIME_YYYYMMDD = int(f'{_max.year}{_max.month:02d}{_max.day:02d}')
+
                 #self.logger.debug(f"    Field Data: {hex(field_data)}({field_data}) -> {converted_val}")
                 field_name_converted = field_name_converted.capitalize()
 
                 # e.g. Timestamp: 2023-01-01 00:00:00 (UTC+9) -> 20230101
                 if field_name_converted == 'Timestamp':
                     _datetime = int(converted_val.split(' ')[0].replace('-',''))
-                    if (_datetime < RECOVER_MINTIME_YYYYMMDD) or (_datetime > RECOVER_MAXTIME_YYYYMMDD):
-                        self.logger.debug(f"TIMESTAMP INVALID: {converted_val}")
+                    if (_datetime < self.RECOVER_MINTIME_YYYYMMDD) or (_datetime > self.RECOVER_MAXTIME_YYYYMMDD):
+                        self.logger.debug(f"TIMESTAMP INVALID: {converted_val} - SKIP")
+                        self.logger.debug(f"{'='*50}")
                         return
 
                 msg = f"{field_name_converted}: {converted_val}" if known_field else f"{field_name_converted}: {field_data}"
+                self.fh_dest.write(f"[*] {msg}\n")
 
             except Exception as e:
                 field_name_converted = field_name_converted.capitalize()
+                converted_val = ''
                 msg = f"[!] OFFSET: {hex(self.current_offset)} | {field_name_converted}: {field_data} - FIELD NAME CANNOT BE CONVERTED"
                 self.logger.critical(msg)
                 return
 
             self.logger.debug(f"[*] {msg}")
-            self.fh_dest.write(f"[*] {msg}\n")
+            #self.fh_dest.write(f"[*] {msg}\n")
 
             # For debugging purpose
             # if field_name_converted == 'Timestamp':
             #     DEBUG_FILE.write(f"{hex(self.current_offset)} ~ {hex(self.current_offset + _tmp_field_size)} | {converted_val}\n")
 
-        self.data_mesg_count += 1
+        if global_mesg != 'FILE_ID':
+            self.data_mesg_count += 1
 
         self.logger.debug(f"{'='*50}")
         self.fh_dest.write(f"{'='*50}\n")
@@ -309,7 +333,7 @@ class recoverRecord:
                     next_offset = next_offset_list[0]
                 else: continue
 
-                sub_regex_list = []
+                autogen_regex_list = []
                 # Generate regex with the values from RECORD Lookup Table
                 if self.LOOKUP_TABLE_GMESG_ONLY_RECORD:
                     for key, val in self.LOOKUP_TABLE_GMESG_ONLY_RECORD.items():
@@ -317,19 +341,20 @@ class recoverRecord:
                         _field_size = '.{' + str(field_size) + ',' + str(field_size) + '}'
                         _local_mesg = f'\\x{key:02X}'
                         _regex = _local_mesg + _field_size + '([\\x00-\\x0F]|[\\x40-\\x4F])'
-                        sub_regex_list.append(_regex.encode())
+                        autogen_regex_list.append(_regex.encode())
 
-                    self.logger.debug(f"REGEX SUB: {sub_regex_list}")
+                    self.logger.debug(f"Auto Generated Regex : {autogen_regex_list}")
 
                     # Configure the target scan area and search with generated regex.
                     buffer = self.fit_data[self.current_offset:next_offset + 1]
-                    for sub_regex_pattern in sub_regex_list:
-                        matches = self.search_with_regex(sub_regex_pattern, buffer)
+                    for autogen_regex_pattern in autogen_regex_list:
+                        matches = self.search_with_regex(autogen_regex_pattern, buffer)
                         match_counts = len(matches)
-                        self.logger.debug(f"SUB REGEX Matched: {sub_regex_pattern} | Counts: {match_counts}")
+                        self.logger.debug(f"Auto Generated Regex Matched: {autogen_regex_pattern} | Counts: {match_counts}")
 
                         sub_offset_list = [(_offset.start(), _offset.end()) for _offset in matches] if matches else []
                         if sub_offset_list:
+                            self.logger.info(f"Getting ready for sliding window pattern match...")
                             for start_offset, end_offset in sub_offset_list:
                                 _keep_base_offset = self.current_offset
                                 self.current_offset = self.current_offset + start_offset
@@ -358,8 +383,9 @@ class recoverRecord:
 
                                     # set the sub-buffer and search with it.
                                     _buffer = buffer[_pushed_start_offset:_pushed_end_offset]
-                                    matches = self.search_with_regex(sub_regex_pattern, _buffer, pattern_size)
+                                    matches = self.search_with_regex(autogen_regex_pattern, _buffer, pattern_size)
                                     if matches:
+                                        self.logger.debug(f"Sliding window pattern match counts: {len(matches)}")
                                         _keep_base_offset = self.current_offset
                                         self.current_offset = self.current_offset + _pushed_start_offset
                                         self.fh_fit.seek(self.current_offset)
@@ -367,13 +393,15 @@ class recoverRecord:
                                         # current_offset back to where it was
                                         self.current_offset = _keep_base_offset
 
-                # After scan recovery area, move to the next closest definition offset to continue parsing remaning data.
+                                        self.autogen_regex_pattern_match_count += 1
+
+                # After scan recovery area, move to the next closest definition offset to continue parsing remaining data.
                 self.fh_fit.seek(next_offset)
 
 
         self.logger.info(f"Job Finished..!!")
         self.logger.info(f"Total Data Message Counts : {self.data_mesg_count}")
-
+        self.logger.info(f"Auto-generated Regex Pattern Match Counts : {self.autogen_regex_pattern_match_count}")
         self.logger.debug("======================WRAP UP========================")
         self.logger.debug(f"RECORD TABLE: {self.LOOKUP_TABLE_GMESG_ONLY_RECORD}")
         self.logger.debug(f"NOT RECORD TABLE: {self.LOOKUP_TABLE_GMESG_NOT_RECORD}")
@@ -388,10 +416,6 @@ class recoverRecord:
 if __name__ == "__main__":
 
     LOG_LEVEL = 'DEBUG'  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-    # Change the value to your needs
-    RECOVER_MINTIME_YYYYMMDD = 20230101
-    RECOVER_MAXTIME_YYYYMMDD = 20230102
-    # RECOVER_MAXTIME_YYYYMMDD = int(datetime.now().strftime("%Y%m%d")) # sets today for RECOVER_MAXTIME
 
     target_file = r'C:\DFRWS\YOUR_CORRUPTED_FIT_FILE.fit'
     output_file = os.path.splitext(target_file)[0] + '.txt'
